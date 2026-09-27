@@ -62,6 +62,10 @@ DEFAULT_CONFIG = {
     "restart_game_after_failures": 3,
     "freeze_timeout": 180,
     "max_same_spot_taps": 6,
+    "action_retries": 2,
+    "confirm_timeout": 2.5,
+    "tap_hold_ms": 0,
+    "retry_tap_hold_ms": 90,
     "screenshot_on_error": True,
     "hotkey": "F8",
     # --- Reconhecimento de imagem ---
@@ -89,10 +93,10 @@ _NUMERIC_KEYS_INT = {
     "max_listings_per_cycle", "advertise_interval", "collect_interval",
     "coins_per_sale_estimate", "max_retries", "step_timeout", "max_recoveries",
     "restart_game_after_failures", "freeze_timeout", "max_same_spot_taps",
-    "drag_step_px", "swipe_duration_ms",
+    "drag_step_px", "swipe_duration_ms", "action_retries", "tap_hold_ms", "retry_tap_hold_ms",
 }
 _NUMERIC_KEYS_FLOAT = {"check_interval", "action_delay", "match_threshold", "drag_hold",
-                       "match_blur", "color_tolerance"}
+                       "match_blur", "color_tolerance", "confirm_timeout"}
 _BOOL_KEYS = {
     "sell_enabled", "advertise_enabled", "collect_money_enabled",
     "screenshot_on_error", "debug_log", "auto_zoom",
@@ -179,6 +183,10 @@ def normalize(cfg):
     except (TypeError, ValueError):
         scales = []
     out["scales"] = scales or [1.0]
+    out["action_retries"] = min(5, max(0, out["action_retries"]))
+    out["confirm_timeout"] = min(15.0, max(0.5, out["confirm_timeout"]))
+    out["tap_hold_ms"] = min(400, max(0, out["tap_hold_ms"]))
+    out["retry_tap_hold_ms"] = min(400, max(0, out["retry_tap_hold_ms"]))
     out["match_blur"] = min(6.0, max(0.0, out["match_blur"]))
     out["color_tolerance"] = min(255.0, max(5.0, out["color_tolerance"]))
     zr = out.get("zoom_range")

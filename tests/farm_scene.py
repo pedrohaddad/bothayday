@@ -31,15 +31,16 @@ def _diamond(cx, cy, w, h):
 class FarmWorld:
     """Mundo fixo: posições dos campos, estados e elementos."""
 
-    def __init__(self, seed=3, fields=None):
+    def __init__(self, seed=3, fields=None, rows=3, cols=3, spacing=(70, 38), origin=(560, 560)):
+        """spacing=(62, 34) = campos encostados, como no Hay Day (vizinho a meia largura/altura)."""
         self.rng = np.random.default_rng(seed)
         self.grass = _grass(self.rng)
         # campos em grade isométrica
         self.fields = []
-        for r in range(3):
-            for c in range(3):
-                cx = 560 + (c - r) * 70
-                cy = 560 + (c + r) * 38
+        for r in range(rows):
+            for c in range(cols):
+                cx = origin[0] + (c - r) * spacing[0]
+                cy = origin[1] + (c + r) * spacing[1]
                 self.fields.append({"pos": (cx, cy), "st": "empty"})
         if fields:
             for f, st in zip(self.fields, fields):
@@ -70,7 +71,7 @@ class FarmWorld:
                     cv2.circle(img, (int(cx + dx), int(cy + dy)), 3, (40, 190, 60), -1)
             elif f["st"] == "ready":
                 for dx, dy, ph in self.stalks:
-                    sway = 3.0 * np.sin(t * 2.0 + ph)  # animação do vento
+                    sway = 3.0 * np.sin(t * 2.0 + ph + f.get("phase", 0.0))  # animação do vento
                     x0, y0 = cx + dx, cy + dy + 8
                     x1, y1 = x0 + sway, y0 - 20
                     cv2.line(img, (int(x0), int(y0)), (int(round(x1)), int(round(y1))), (60, 170, 215), 2)

@@ -8,7 +8,7 @@ import time
 
 from adb_controller import ADBController, ADBError, ADBInterrupted, DeviceLost
 from config import parse_resolution
-from image_detector import TemplateLibrary, build_detector
+from image_detector import DUPLICATE_ISO_DISTANCE, TemplateLibrary, build_detector, grid_dedupe, grid_spacing
 from logger_setup import get_logger
 from screen import Screen
 from state_machine import BotStopped, FatalError, State, StateMachine, StepFailed
@@ -24,6 +24,33 @@ class GameNotRunning(Exception):
 
 class EmulatorFrozen(Exception):
     """A tela não muda há muito tempo."""
+
+
+FIELD_KEYS = {"empty": "wheat_empty", "ready": "wheat_ready", "growing": "wheat_growing"}
+FIELD_NAMES = {"empty": "vazia", "ready": "pronta", "growing": "crescendo"}
+STUCK_TTL = 180  # s que um trigo que não respondeu fica fora da colheita antes de nova tentativa
+
+
+class FieldScan:
+    """Plantações vistas num screenshot: cada posição com UM estado + o que foi descartado e por quê."""
+
+    def __init__(self):
+        self.empty, self.ready, self.growing = [], [], []
+        self.discarded = []  # [(Match, motivo)]
+
+    @property
+    def total(self):
+        return len(self.empty) + len(self.ready) + len(self.growing)
+
+    def state_at(self, target):
+        for key in ("empty", "ready", "growing"):
+            if any(target.iso_distance(m) < DUPLICATE_ISO_DISTANCE for m in getattr(self, key)):
+                return key
+        return None
+
+    def nearest(self, key, target, max_iso=1.5):
+        best = min(getattr(self, key), key=lambda m: m.iso_distance(target), default=None)
+        return best if best is not None and best.iso_distance(target) < max_iso else None
 
 
 class BotStats:
@@ -100,7 +127,7 @@ class HayDayBot:
         self.recover_failures = 0
         self.force_restart = False
         self.silo_full = False
-        self.harvest_attempts = collections.Counter()
+        self.stuck = []  # [(Match, instante)] trigos que não responderam à colheita
         self.stats.set(wheat_stock=int(self.cfg["initial_wheat_stock"]))
 
     # ================================================================ ciclo de vida
@@ -295,13 +322,62 @@ class HayDayBot:
             raise StepFailed(f"Proteção anti-loop: '{label}' tocado {self.cfg['max_same_spot_taps']}x "
                              f"no mesmo lugar em 60s sem resultado")
 
-    def tap(self, x, y, label="", guard=True, delay_factor=1.0):
+    def tap(self, x, y, label="", guard=True, delay_factor=1.0, hold_ms=None):
         self._check()
         if guard:
             self._guard_tap(x, y, label)
-        log.debug("Toque %s em (%d,%d)", label, x, y)
-        self.adb.tap(x, y)
+        hold = self.cfg["tap_hold_ms"] if hold_ms is None else hold_ms
+        log.debug("Toque %s em (%d,%d)%s", label, x, y, f" segurando {hold} ms" if hold else "")
+        if hold:
+            self.adb.tap(x, y, hold)
+        else:
+            self.adb.tap(x, y)
         self.pause(delay_factor)
+
+    def tap_confirmed(self, point, label, confirm, refresh=None, attempts=None, timeout=None):
+        """Clique -> espera a resposta visual do jogo -> confirma.
+
+        confirm(img) devolve algo verdadeiro quando o jogo respondeu (ex.: o menu apareceu).
+        refresh() recalcula a posição do alvo num screenshot novo (ou None se ele sumiu).
+        A 2ª tentativa usa a posição recalculada e um toque um pouco mais longo.
+        Retorna o resultado de confirm() ou None se a ação não foi confirmada.
+        """
+        attempts = attempts or (1 + self.cfg["action_retries"])
+        timeout = timeout or self.cfg["confirm_timeout"]
+        for attempt in range(1, attempts + 1):
+            x, y = int(point[0]), int(point[1])
+            hold = self.cfg["tap_hold_ms"] if attempt == 1 else max(self.cfg["tap_hold_ms"],
+                                                                   self.cfg["retry_tap_hold_ms"])
+            log.info("Clique enviado: (%d, %d) — %s%s; aguardando confirmação...", x, y, label,
+                     f" [tentativa {attempt}/{attempts}, toque de {hold} ms]" if attempt > 1 else "")
+            t0 = time.monotonic()
+            self.tap(x, y, label, delay_factor=0.3, hold_ms=hold)
+            img = None
+            while True:
+                img = self.capture()
+                result = confirm(img)
+                if result:
+                    log.info("Ação confirmada: %s (%.1fs)", label, time.monotonic() - t0)
+                    return result
+                if time.monotonic() - t0 >= timeout:
+                    break
+                self.sleep(0.3)
+            last = attempt == attempts
+            log.warning("Ação NÃO confirmada: %s — o jogo não respondeu em %.1fs%s", label, timeout,
+                        "" if last else "; recalculando a posição e tentando de novo")
+            if last:
+                break
+            if not self.is_farm(img):
+                self.dismiss_popups(img)
+            if refresh is not None:
+                new = refresh()
+                if new is None:
+                    log.warning("O alvo de '%s' não está mais na tela; não vou tocar de novo.", label)
+                    return None
+                if abs(new[0] - x) + abs(new[1] - y) > 2:
+                    log.info("Posição recalculada: (%d, %d) -> (%d, %d)", x, y, new[0], new[1])
+                point = new
+        return None
 
     def tap_match(self, m, label=None, guard=True, delay_factor=1.0):
         x, y = m.center
@@ -421,23 +497,97 @@ class HayDayBot:
             mode = "motionevent" if self.adb.supports_motionevent() else "swipe"
         return mode
 
-    def drag_tool(self, targets, tool_category, label):
-        """Toca num alvo para abrir o menu, pega a ferramenta (semente/foice) e arrasta sobre os alvos."""
-        ordered = self.order_path(targets)
-        tool = None
-        for t in ordered[:3]:
-            self.tap_match(t, f"{label}: abrir menu")
-            tool = self.wait_for(tool_category, timeout=3)
-            if tool:
-                break
-            img = self.capture()
-            if not self.is_farm(img):
-                self.dismiss_popups(img)
-        if tool is None:
-            raise StepFailed(f"O ícone '{tool_category}' não apareceu ao tocar no campo")
+    # ------------------------------------------------------------ plantações
+    def scan_fields(self, img, purpose=None):
+        """captura -> detecção -> validação -> lista única de plantações com estado.
 
+        Uma mesma posição pode casar com mais de um template (ex.: brotos sobre a terra casam
+        com 'vazio' e 'crescendo'); fica o estado de maior pontuação e o outro é registrado
+        como descartado, com o motivo.
+        """
+        scan = FieldScan()
+        tagged = []
+        for key, cat in FIELD_KEYS.items():
+            if not self.library.has(cat):
+                if key != "growing":
+                    self.has_template(cat)
+                continue
+            found, rejected = self.detector.find_all_explained(img, cat)
+            tagged += [(m, key) for m in found]
+            scan.discarded += [(m, why) for m, why in rejected]
+        tagged.sort(key=lambda t: -t[0].score)
+        kept = []
+        for m, key in tagged:
+            clash = next(((k, kk) for k, kk in kept if m.iso_distance(k) < DUPLICATE_ISO_DISTANCE), None)
+            if clash is not None:
+                scan.discarded.append((m, f"mesma plantação já classificada como {FIELD_NAMES[clash[1]]} "
+                                          f"({clash[0].score:.2f} > {m.score:.2f})"))
+                continue
+            kept.append((m, key))
+        # ecos: usa o espaçamento do grid medido com TODAS as plantações (o grid completo)
+        state = {id(m): key for m, key in kept}
+        all_fields = [m for m, _ in kept]
+        if len(all_fields) >= 4:
+            self.detector.field_spacing = grid_spacing(all_fields)
+        for m in grid_dedupe(all_fields, scan.discarded, spacing=self.detector.field_spacing):
+            getattr(scan, state[id(m)]).append(m)
+        if purpose:
+            self._log_scan(scan, purpose)
+        return scan
+
+    def _log_scan(self, scan, purpose):
+        log.info("[%s] Plantações detectadas: %d -> vazias %d, prontas %d, crescendo %d | "
+                 "candidatos descartados: %d", purpose, scan.total, len(scan.empty), len(scan.ready),
+                 len(scan.growing), len(scan.discarded))
+        for m, why in sorted(scan.discarded, key=lambda r: -r[0].score)[:10]:
+            log.info("   descartado %s em %s (%.2f): %s", m.category, m.center, m.score, why)
+        if len(scan.discarded) > 10:
+            log.info("   ... e mais %d descartados (veja o log detalhado)", len(scan.discarded) - 10)
+            for m, why in scan.discarded[10:]:
+                log.debug("   descartado %s em %s (%.2f): %s", m.category, m.center, m.score, why)
+
+    def _is_stuck(self, m):
+        now = time.time()
+        self.stuck = [(s, t) for s, t in self.stuck if now - t < STUCK_TTL]
+        return any(m.iso_distance(s) < DUPLICATE_ISO_DISTANCE for s, _ in self.stuck)
+
+    def open_tool_menu(self, ordered, tool_cat, label, kind):
+        """Toca numa plantação e CONFIRMA que o menu (semente/foice) abriu. Retorna o Match do ícone.
+
+        No máximo 2 plantações x 2 tentativas (a 2ª com a posição recalculada) = 4 toques.
+        """
+        if not self.has_template(tool_cat):
+            raise StepFailed(f"Sem template '{tool_cat}': impossível confirmar o menu, nenhum toque enviado")
+        img = self.capture()
+        pre = self.detector.find(img, tool_cat)
+        if pre is not None:
+            log.info("Menu de '%s' já está aberto (ícone em %s); usando-o.", label, pre.center)
+            return pre
+        other = "sickle" if tool_cat == "seed_wheat" else "seed_wheat"
+        if self.library.has(other) and self.detector.find(img, other) is not None:
+            log.info("Outro menu (%s) está aberto: o 1º toque pode apenas fechá-lo.", other)
+        for target in ordered[:2]:
+            box = {"t": target}
+
+            def refresh(box=box):
+                scan = self.scan_fields(self.capture())
+                near = scan.nearest(kind, box["t"])
+                if near is None:
+                    return None
+                box["t"] = near
+                return near.center
+
+            tool = self.tap_confirmed(target.center, f"{label}: abrir menu na plantação {target.center}",
+                                      confirm=lambda im: self.detector.find(im, tool_cat), refresh=refresh,
+                                      attempts=2)
+            if tool:
+                return tool
+        raise StepFailed(f"O menu '{tool_cat}' não abriu ao tocar nas plantações (confirmação visual falhou)")
+
+    def _drag_over(self, tool, ordered, tool_cat, label, kind):
         mode = self._drag_mode()
-        log.debug("Arrastando %s sobre %d campos (modo %s)", tool_category, len(ordered), mode)
+        log.info("Arrastando '%s' de %s sobre %d plantações (modo %s): %s", tool_cat, tool.center,
+                 len(ordered), mode, " -> ".join(str(t.center) for t in ordered))
         if mode == "motionevent":
             points = [tool.center] + [t.center for t in ordered]
             self._pending_touch = points[-1]
@@ -448,16 +598,61 @@ class HayDayBot:
         else:
             for i, t in enumerate(ordered):
                 if i > 0:
-                    self.tap_match(t, f"{label}: abrir menu", guard=False)
-                    tool = self.wait_for(tool_category, timeout=3)
-                    if tool is None:
-                        log.warning("Menu não abriu no campo %s; pulando.", t)
+                    try:
+                        tool = self.open_tool_menu([t], tool_cat, label, kind)
+                    except StepFailed as exc:
+                        log.warning("Pulando %s nesta passagem: %s", t.center, exc)
                         continue
                 tx, ty = tool.center
                 cx, cy = t.center
                 self.adb.swipe(tx, ty, cx, cy, self.cfg["swipe_duration_ms"])
                 self.pause()
         self.pause(2)
+
+    def work_fields(self, kind, targets, tool_cat, label):
+        """Planta/colhe em passagens, confirmando visualmente CADA plantação.
+
+        Retorna (confirmadas, restantes, último screenshot, interrompido_por_janela).
+        """
+        done = []
+        remaining = list(targets)
+        img = None
+        interrupted = None
+        passes = 1 + self.cfg["action_retries"]
+        zero_progress = 0
+        for n in range(1, passes + 1):
+            if not remaining:
+                break
+            ordered = self.order_path(remaining)
+            tool = self.open_tool_menu(ordered, tool_cat, label, kind)
+            self._drag_over(tool, ordered, tool_cat, label, kind)
+            img = self.capture()
+            if self.library.has("silo_full") and self.detector.find(img, "silo_full") is not None:
+                interrupted = "silo_full"
+            elif not self.is_farm(img):
+                interrupted = "popup"
+            if interrupted:
+                log.warning("Uma janela apareceu depois de %s (%s). Fechando.", label,
+                            "silo cheio" if interrupted == "silo_full" else "sem trigo suficiente?")
+                self.dismiss_popups(img)
+                self.sleep(1)
+                img = self.ensure_farm()
+            after = self.scan_fields(img)
+            still, ok = [], []
+            for t in remaining:
+                (ok if after.state_at(t) != kind else still).append(t)
+            done += ok
+            log.info("[%s] Passagem %d/%d: %d alvos -> %d confirmados na tela%s", label, n, passes,
+                     len(remaining), len(ok),
+                     "" if not still else "; sem mudança em " + ", ".join(str(t.center) for t in still))
+            # próxima passagem só com os que não mudaram, nas posições RECALCULADAS
+            remaining = [after.nearest(kind, t) or t for t in still]
+            if interrupted:
+                break
+            zero_progress = zero_progress + 1 if not ok else 0
+            if zero_progress >= 2:
+                break
+        return done, remaining, img, interrupted
 
     @staticmethod
     def removed(before, after):
@@ -593,19 +788,16 @@ class HayDayBot:
 
     def st_check_field(self, ctx):
         img = self.ensure_farm()
-        empty = self.find_all("wheat_empty", img)
-        ready = self.find_all("wheat_ready", img)
-        growing = self.find_all("wheat_growing", img) if self.library.has("wheat_growing") else []
-        total = len(empty) + len(ready) + len(growing)
-        if total == 0 and self.detector.calibrate_world(img) is not None:
+        scan = self.scan_fields(img)
+        if scan.total == 0 and self.detector.calibrate_world(img) is not None:
             log.info("Zoom da câmera recalibrado: %.2fx", self.detector.world_zoom)
-            empty = self.find_all("wheat_empty", img)
-            ready = self.find_all("wheat_ready", img)
-            growing = self.find_all("wheat_growing", img) if self.library.has("wheat_growing") else []
-            total = len(empty) + len(ready) + len(growing)
+            scan = self.scan_fields(img)
+        self._log_scan(scan, "verificação")
+        total = scan.total
         self.stats.set(fields_found=total)
-        self.action(f"Campos encontrados: {total} (vazios {len(empty)}, prontos {len(ready)}, "
-                    f"crescendo {len(growing)})")
+        harvestable = [m for m in scan.ready if not self._is_stuck(m)]
+        self.action(f"Campos encontrados: {total} (vazios {len(scan.empty)}, prontos {len(scan.ready)}, "
+                    f"crescendo {len(scan.growing)})")
         growing_expected = (self.last_plant_time and
                             time.time() - self.last_plant_time < self.cfg["max_wait_growth"])
         if total == 0 and growing_expected:
@@ -620,40 +812,38 @@ class HayDayBot:
             log.info("Nenhum campo visível; os campos podem estar crescendo. Aguardando.")
             return State.WAIT_GROWTH
         self.no_fields_count = 0
-        if ready:
+        if harvestable:
             return State.HARVEST
-        if empty:
+        if len(harvestable) < len(scan.ready):
+            log.info("%d trigo(s) pronto(s) em espera após não responderem; serão tentados de novo em "
+                     "até %ds.", len(scan.ready) - len(harvestable), STUCK_TTL)
+        if scan.empty:
             return State.PLANT
         return State.WAIT_GROWTH
 
     def st_plant(self, ctx):
         img = self.ensure_farm()
-        empty = self.find_all("wheat_empty", img)
-        if not empty:
-            log.info("Nenhum campo vazio para plantar.")
+        scan = self.scan_fields(img, "plantio")
+        if not scan.empty:
+            log.info("Nenhum espaço vazio para plantar.")
             return State.WAIT_GROWTH
-        self.action("Plantando trigo")
-        self.drag_tool(empty, "seed_wheat", "plantar")
-
-        img = self.capture()
-        if not self.is_farm(img):
-            log.warning("Apareceu uma janela após plantar (sem trigo suficiente?). Fechando.")
-            self.dismiss_popups(img)
-            self.sleep(1)
-            img = self.ensure_farm()
-        after = self.find_all("wheat_empty", img)
-        planted = len(self.removed(empty, after))
+        self.action(f"Plantando trigo em {len(scan.empty)} espaço(s) livre(s)")
+        done, remaining, img, interrupted = self.work_fields("empty", scan.empty, "seed_wheat", "plantar")
+        planted = len(done)
         if planted == 0:
-            raise StepFailed("Nenhum campo foi plantado (verifique o template seed_wheat e o estoque de trigo)")
+            raise StepFailed("Nenhum campo foi plantado (confirmação visual falhou; verifique o template "
+                             "seed_wheat e o estoque de trigo)")
         self.stats.inc("fields_planted", planted)
         self.stats.set(wheat_stock=max(0, self.stats.wheat_stock - planted))
         self.last_planted = planted
         self.last_plant_time = time.time()
-        self.harvest_attempts.clear()
         self.recoveries = 0
         self.action(f"{planted} campos plantados")
-        if after:
-            log.info("%d campos continuam vazios (estoque de trigo acabou?).", len(after))
+        if remaining:
+            log.warning("%d espaço(s) continuam vazios: %s%s", len(remaining),
+                        ", ".join(str(t.center) for t in remaining),
+                        " — o jogo abriu uma janela (falta de trigo?)" if interrupted else
+                        " — o arrasto passou por eles sem efeito; serão tentados no próximo ciclo")
         return State.WAIT_GROWTH
 
     def st_wait_growth(self, ctx):
@@ -669,7 +859,7 @@ class HayDayBot:
             img = self.capture()
             if not self.is_farm(img):
                 img = self.ensure_farm()
-            ready = self.find_all("wheat_ready", img)
+            ready = [m for m in self.find_all("wheat_ready", img) if not self._is_stuck(m)]
             grown_long_enough = since_plant + elapsed >= grow * 0.9
             if ready and (len(ready) >= max(1, self.last_planted) or grown_long_enough):
                 self.action(f"Trigo pronto ({len(ready)} campos)")
@@ -691,38 +881,31 @@ class HayDayBot:
 
     def st_harvest(self, ctx):
         img = self.ensure_farm()
-        ready = self.find_all("wheat_ready", img)
-        # Evita insistir em posições que já falharam 2x (falso positivo, obstáculo...).
-        targets = [m for m in ready
-                   if self.harvest_attempts[(m.center[0] // 20, m.center[1] // 20)] < 2]
-        if len(targets) < len(ready):
-            log.warning("Ignorando %d campos que não responderam à colheita.", len(ready) - len(targets))
+        scan = self.scan_fields(img, "colheita")
+        targets = [m for m in scan.ready if not self._is_stuck(m)]
+        waiting = [m for m in scan.ready if self._is_stuck(m)]
+        if waiting:
+            log.info("%d trigo(s) em espera (não responderam há pouco): %s", len(waiting),
+                     ", ".join(str(m.center) for m in waiting))
         if not targets:
-            log.info("Nenhum campo pronto para colher.")
-            return State.CHECK_FIELD if not ready else State.SELL
-        for m in targets:
-            self.harvest_attempts[(m.center[0] // 20, m.center[1] // 20)] += 1
+            log.info("Nenhum trigo pronto para colher agora.")
+            return State.PLANT if scan.empty else State.SELL
 
-        self.action("Colhendo")
-        self.drag_tool(targets, "sickle", "colher")
-        img = self.capture()
-        silo_full = self.library.has("silo_full") and self.detector.find(img, "silo_full") is not None
-        if silo_full or not self.is_farm(img):
-            if silo_full:
-                self.action("Silo cheio! Indo vender.")
-                self.silo_full = True
-            self.dismiss_popups(img)
-            self.sleep(1)
-            img = self.ensure_farm()
-        after = self.find_all("wheat_ready", img)
-        harvested = self.removed(targets, after)
-        n = len(harvested)
+        self.action(f"Colhendo {len(targets)} trigo(s)")
+        done, remaining, img, interrupted = self.work_fields("ready", targets, "sickle", "colher")
+        if interrupted == "silo_full":
+            self.action("Silo cheio! Indo vender.")
+            self.silo_full = True
+        for m in remaining:
+            self.stuck.append((m, time.time()))
+        if remaining:
+            log.warning("%d trigo(s) não responderam à colheita: %s — nova tentativa em até %ds.",
+                        len(remaining), ", ".join(str(m.center) for m in remaining), STUCK_TTL)
+        n = len(done)
         if n == 0:
             if self.silo_full:
                 return State.SELL
             raise StepFailed("A colheita não foi confirmada na tela (os campos continuam prontos)")
-        for m in harvested:
-            self.harvest_attempts.pop((m.center[0] // 20, m.center[1] // 20), None)
         self.stats.inc("fields_harvested", n)
         self.stats.inc("wheat_stock", n * self.cfg["yield_per_field"])
         self.stats.inc("cycles")

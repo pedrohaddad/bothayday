@@ -246,7 +246,7 @@ class FakeADB:
         self._chk()
         return self.game.render()
 
-    def tap(self, x, y):
+    def tap(self, x, y, hold_ms=0):
         self._chk()
         self.game.tap(x, y)
 

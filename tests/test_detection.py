@@ -129,7 +129,7 @@ class SceneADB:
         self.t += 0.37
         return screenshot(self.world, self.zoom, cx=700.2, t=self.t, popup=self.popup)
 
-    def tap(self, x, y):
+    def tap(self, x, y, hold_ms=0):
         if self.popup and abs(x - 478) < 18 and abs(y - 122) < 18:
             self.popup = False
 

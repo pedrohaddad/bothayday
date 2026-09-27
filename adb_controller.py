@@ -195,8 +195,13 @@ class ADBController:
         return int(m.group(1)), int(m.group(2))
 
     # --------------------------------------------------------------- entrada
-    def tap(self, x, y):
-        self.shell(f"input tap {int(x)} {int(y)}")
+    def tap(self, x, y, hold_ms=0):
+        """Toque. Com hold_ms > 0 o dedo fica pressionado esse tempo (swipe parado no lugar):
+        alguns jogos ignoram o `input tap` instantâneo quando o emulador está com FPS baixo."""
+        if hold_ms and hold_ms > 0:
+            self.shell(f"input swipe {int(x)} {int(y)} {int(x)} {int(y)} {int(hold_ms)}")
+        else:
+            self.shell(f"input tap {int(x)} {int(y)}")
 
     def swipe(self, x1, y1, x2, y2, duration_ms=300):
         self.shell(f"input swipe {int(x1)} {int(y1)} {int(x2)} {int(y2)} {int(duration_ms)}",

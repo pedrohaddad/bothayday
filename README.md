@@ -188,7 +188,7 @@ e qual zoom faria o elemento aparecer. O botão **Calibrar zoom** aplica a calib
   que muda (grama, animais, sombras, números).
 - Coloque **várias imagens** na mesma pasta para variações (dia/noite, selecionado/não selecionado).
 - **Elementos animados** (`wheat_ready`, `wheat_growing`): no *Recortar template* deixe
-  "Quadros extras da animação" em 4 (já vem assim para essas pastas). Ele captura mais telas e
+  "Quadros extras da animação" em 5 (já vem assim para essas pastas; são capturados ao longo de ~4 s para cobrir um ciclo inteiro do balanço). Ele captura mais telas e
   salva o mesmo retângulo como `nome_q1.png`, `nome_q2.png`… Não mexa na câmera enquanto isso.
 - Para `farm`, prefira um **ícone fixo do HUD** (não muda com o zoom). Uma construção também
   funciona, graças à calibração de zoom, mas é menos estável.
@@ -273,6 +273,9 @@ Tudo pode ser alterado pela interface (aba *Configurações*). Principais chaves
 | `restart_game_after_failures` | 3 | Falhas de recuperação antes de reiniciar o Hay Day. |
 | `freeze_timeout` | 180 | Tela idêntica por mais que isso = emulador travado → reinicia o jogo (0 desliga). |
 | `max_same_spot_taps` | 6 | Máximo de toques no mesmo ponto em 60 s (anti-loop). |
+| `action_retries` | 2 | Passagens extras de plantio/colheita para as plantações que não mudaram na tela. |
+| `confirm_timeout` | 2.5 | Tempo máximo esperando o jogo responder a um clique (ex.: o menu abrir). |
+| `tap_hold_ms` / `retry_tap_hold_ms` | 0 / 90 | Duração do toque normal / da nova tentativa quando o clique não foi confirmado. |
 | `screenshot_on_error` | true | Salva screenshot em `screenshots/errors/` a cada erro. |
 | `hotkey` | `F8` | Tecla de parada de emergência. |
 | `match_threshold` / `thresholds` / `scales` | 0.80 / {} / [1.0] | Reconhecimento de imagem. |
@@ -290,8 +293,12 @@ Tudo pode ser alterado pela interface (aba *Configurações*). Principais chaves
   pendente. A tecla F8 é global (biblioteca `keyboard`); se ela não puder ser registrada, F8
   funciona com a janela do bot em foco e o log avisa.
 - **Limite de tentativas** por etapa, **timeout** por etapa, e limite global de falhas seguidas.
-- **Anti-loop:** nenhum ponto pode ser tocado mais de `max_same_spot_taps` vezes em 60 s; campos
-  que não respondem à colheita 2× são ignorados; caixotes que não coletam não são repetidos.
+- **Anti-loop:** nenhum ponto pode ser tocado mais de `max_same_spot_taps` vezes em 60 s; trigos
+  que não respondem à colheita ficam em espera por 3 minutos (não para sempre) enquanto o bot
+  continua plantando; caixotes que não coletam não são repetidos.
+- **Ações confirmadas na tela:** um clique só conta como feito quando o jogo responde (ex.: o menu
+  da semente/foice abre). Depois de cada arrasto o bot confere plantação por plantação e repete
+  só as que não mudaram, em posições recalculadas (`action_retries` passagens extras).
 - **Nunca toca sem ter encontrado o template.** Se um botão não é encontrado, o bot espera,
   tenta voltar ou vai para o estado seguro.
 - **Nunca toca em botões de compra/diamantes**: em telas inesperadas só usa `reconnect`,
@@ -362,7 +369,7 @@ PyInstaller e da biblioteca de teclado global; adicione uma exceção se necess�
 | “adb server version doesn't match” | Feche outros programas com adb (Android Studio, outro emulador) e use o adb do próprio emulador. |
 | Dispositivo `unauthorized`/`offline` | Reinicie o emulador; em MuMu ative o ADB nas configurações. |
 | Campos/fazenda não encontrados | Use **Testar detecção** com um screenshot atual e leia a mensagem: se indicar outro zoom, clique **Calibrar zoom**; se indicar rejeição por cor/brilho, há uma janela aberta. O log do `OPEN_GAME` mostra o mesmo diagnóstico. |
-| Trigo pronto oscila entre achado/não achado | Recorte de novo com 4 quadros extras da animação. |
+| Trigo pronto oscila entre achado/não achado | Recorte de novo com 5 quadros extras da animação. |
 | Planta/colhe só alguns campos | Aumente `drag_hold`, reduza `drag_step_px` ou use `drag_mode = swipe`. |
 | Clica em coisa errada | Suba o limiar da pasta em `thresholds` ou recorte uma área mais característica. |
 | F8 não funciona com o emulador em foco | Execute o bot como administrador (a biblioteca `keyboard` pode precisar) ou use o botão PARAR. |

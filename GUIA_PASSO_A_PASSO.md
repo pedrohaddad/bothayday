@@ -198,10 +198,10 @@ elemento. Você vai criar cada um pela própria janela do bot.
 4. No topo dessa janela:
    - **Categoria:** escolha a pasta (ex.: `wheat_empty`). Embaixo aparece a explicação do que recortar.
    - **Nome:** pode deixar vazio (o bot dá um nome).
-   - **Quadros extras da animação:** deixe como veio (**4** para `wheat_ready` e `wheat_growing`, **0** para o resto).
+   - **Quadros extras da animação:** deixe como veio (**5** para `wheat_ready` e `wheat_growing`, **0** para o resto).
 5. **Arraste o mouse** sobre o elemento para desenhar o retângulo verde. Embaixo aparece a prévia.
 6. Clique em **Salvar recorte**.
-   - Se houver quadros de animação, **não mexa em nada por ~3 segundos** enquanto o bot captura.
+   - Se houver quadros de animação, **não mexa em nada por ~5 segundos** enquanto o bot captura.
 7. Leia a mensagem da janela: deve aparecer **`Autoteste nesta imagem: 0.9x ✔`**.
    - Se aparecer ✘, apague o arquivo (botão **Abrir pasta selecionada** na aba Templates) e recorte de novo.
 8. Para o próximo template, deixe a nova tela no jogo e clique em **Capturar nova** na própria janela de recorte.
@@ -225,8 +225,8 @@ Faça na ordem, pois ela segue as telas do jogo.
 |---|---|---|
 | `farm` | Um **ícone fixo do HUD** que só aparece na fazenda (ex.: a engrenagem de configurações ou o ícone da loja/caminhão no canto). **Não** recorte o contador de moedas/XP. | ✅ Sim |
 | `wheat_empty` | O **miolo de um campo vazio** (terra marrom arada). Colha/plante antes para ter um campo vazio na tela. | ✅ Sim |
-| `wheat_ready` | O **miolo de um campo com trigo maduro** (dourado). Deixe **4 quadros extras**. | ✅ Sim |
-| `wheat_growing` | O miolo de um campo com trigo **crescendo** (verde). Deixe 4 quadros extras. | Opcional |
+| `wheat_ready` | O **miolo de um campo com trigo maduro** (dourado). Deixe **5 quadros extras**. | ✅ Sim |
+| `wheat_growing` | O miolo de um campo com trigo **crescendo** (verde). Deixe 5 quadros extras. | Opcional |
 | `shop` | A **banca de beira de estrada** vista na fazenda (o toldo/placa). | Para vender/coletar |
 
 #### B) Tela: menu de sementes
@@ -316,7 +316,7 @@ Esta janela usa **exatamente o mesmo detector do bot**.
 | `rejeitado pela cor/brilho (janela por cima?)` | Tem uma janela escurecendo a tela | Feche a janela no jogo e capture de novo |
 | `melhor 0.5x` e nada sugerido | O recorte não serve | Recorte de novo seguindo as regras de ouro |
 | Retângulos em lugares errados | Recorte pouco característico | Recorte uma área mais distinta |
-| Trigo pronto às vezes sim, às vezes não | Faltam quadros da animação | Recorte de novo com **4 quadros extras** |
+| Trigo pronto às vezes sim, às vezes não | Faltam quadros da animação | Recorte de novo com **5 quadros extras** |
 
 > ⚠️ **Não baixe o “Limiar” abaixo de 0.80 para “fazer funcionar”.** Isso causa cliques errados.
 > Se precisar, refaça o recorte.
@@ -376,6 +376,40 @@ O log deve mostrar algo assim:
 ```
 
 ✅ **Confira:** a bolinha fica **amarela (Executando)** e os números do painel sobem.
+
+### Como ler o log de diagnóstico
+
+A cada decisão o bot mostra **o que viu** e **por quê** agiu assim:
+
+```
+[colheita] Plantações detectadas: 9 -> vazias 0, prontas 8, crescendo 1 | candidatos descartados: 2
+   descartado wheat_ready em (231, 402) (0.76): pontuação 0.76 abaixo do limiar 0.80
+   descartado wheat_empty em (300, 270) (0.83): mesma plantação já classificada como pronta (0.95 > 0.83)
+Colhendo 8 trigo(s)
+Clique enviado: (158, 330) — colher: abrir menu na plantação (158, 330); aguardando confirmação...
+Ação confirmada: colher: abrir menu na plantação (158, 330) (0.4s)
+Arrastando 'sickle' de (213, 285) sobre 8 plantações (modo motionevent): (158, 330) -> ...
+[colher] Passagem 1/3: 8 alvos -> 7 confirmados na tela; sem mudança em (344, 468)
+Clique enviado: (344, 468) — colher: abrir menu ...; aguardando confirmação...
+Ação NÃO confirmada: ... — o jogo não respondeu em 2.5s; recalculando a posição e tentando de novo
+Posição recalculada: (344, 468) -> (343, 466)
+Clique enviado: (343, 466) — ... [tentativa 2/2, toque de 90 ms]; aguardando confirmação...
+Ação confirmada: ...
+[colher] Passagem 2/3: 1 alvos -> 1 confirmados na tela
+8 campos colhidos
+```
+
+| Linha | O que significa |
+|---|---|
+| `Plantações detectadas: N -> vazias/prontas/crescendo` | A lista única de plantações que o bot vai usar (cada posição com um só estado). |
+| `descartado ... abaixo do limiar` | Parecia o elemento (forma e cor), mas a pontuação ficou abaixo do limiar. Se for um trigo real, **recorte de novo** (não baixe o limiar). |
+| `descartado ... cor/brilho diferente` | A forma bate, mas a cor não (ex.: janela escurecendo a tela, ou outro tipo de plantação). |
+| `descartado ... eco/duplicado da plantação` | Um segundo acerto dentro da MESMA plantação. Foi descartado de propósito. |
+| `descartado ... já classificada como ...` | Dois templates viram a mesma posição; ficou o estado de maior pontuação. |
+| `Clique enviado` / `Ação confirmada` | O toque foi enviado **e** o jogo respondeu (o menu abriu). |
+| `Ação NÃO confirmada` | O jogo não respondeu. O bot recalcula a posição num screenshot novo e tenta **uma** vez mais com um toque um pouco mais longo. |
+| `Passagem N: X alvos -> Y confirmados; sem mudança em (...)` | Depois de cada arrasto, o bot confere plantação por plantação. As que não mudaram entram na próxima passagem. |
+| `trigo(s) não responderam à colheita ... nova tentativa em até 180s` | Um trigo que não respondeu fica em espera por 3 minutos, **não** para sempre. Enquanto isso, o bot continua plantando os espaços vazios. |
 
 ---
 
@@ -437,7 +471,10 @@ Quando houver uma versão nova:
 | “Nenhum campo reconhecido” | 📱 + 🤖 Templates | Confira se os campos estão na tela (Etapa 5) e teste `wheat_empty`/`wheat_ready` (Etapa 9). |
 | Planta ou colhe só alguns campos | 🤖 Configurações → Arrasto | Aumente **Segurar antes de arrastar** para `0.4`, ou mude o **Modo** para `swipe`. |
 | Clica no lugar errado | 🤖 Templates | Refaça o recorte da categoria culpada, com uma área mais característica. |
-| Trigo pronto às vezes não é achado | 🤖 Templates | Recorte `wheat_ready` de novo com **4 quadros extras**. |
+| Trigo pronto às vezes não é achado | 🤖 Templates | Recorte `wheat_ready` de novo com **5 quadros extras**. |
+| Log mostra `descartado ... abaixo do limiar` num trigo real | 🤖 Templates | Recorte de novo aquele tipo (mais quadros da animação, ou o miolo do campo). |
+| Muitos `Ação NÃO confirmada` seguidos | 🤖 Configurações → Tempo e segurança | Aumente **Duração do toque** para `60` e **Tempo máx. esperando o jogo responder** para `3.5`. |
+| Muitos `sem mudança` nas passagens de plantio | 🤖 Configurações → Arrasto | Aumente **Segurar antes de arrastar** para `0.4`, ou mude o **Modo** para `swipe`. |
 | F8 não funciona | 🪟 | Feche o bot e abra o `run.bat` com botão direito → **Executar como administrador**. |
 | Bot parou com 🔴 Erro | 🤖 Painel | Veja o **Último erro**, o log e o screenshot em `screenshots\errors`. |
 
@@ -449,10 +486,11 @@ Se algo não funcionar, junte estes arquivos (todos ficam em `C:\HayDayBot`):
 
 1. `config.json`
 2. a pasta `templates` inteira
-3. 1 ou 2 screenshots da **fazenda**, tirados pelo botão **CAPTURAR TELA** (ficam em `screenshots`)
-4. o screenshot do erro em `screenshots\errors` (se houver)
-5. o log do dia em `logs`
-6. o texto que o **Testar detecção** mostra para a categoria com problema
+3. o trecho do log com as linhas `Plantações detectadas`, `descartado`, `Clique enviado` e `Passagem` do momento do problema
+4. 1 ou 2 screenshots da **fazenda**, tirados pelo botão **CAPTURAR TELA** (ficam em `screenshots`)
+5. o screenshot do erro em `screenshots\errors` (se houver)
+6. o log do dia em `logs`
+7. o texto que o **Testar detecção** mostra para a categoria com problema
 
 O jeito mais fácil de me mandar, sem usar git:
 

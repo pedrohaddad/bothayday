@@ -100,10 +100,10 @@ class TemplateCropper(tk.Toplevel):
         req, desc = TEMPLATE_CATEGORIES.get(cat, ("personalizado", "Categoria personalizada."))
         extra = ""
         if cat in ANIMATED_DEFAULT:
-            extra = ("  • Elemento ANIMADO: salve com 4 quadros extras (a câmera não pode se mexer "
+            extra = ("  • Elemento ANIMADO: salve com 5 quadros extras, capturados ao longo de ~4 s (a câmera não pode se mexer "
                      "durante a captura).")
             if self.capture_cb:
-                self.frames_var.set(4)
+                self.frames_var.set(5)
         elif self.capture_cb:
             self.frames_var.set(0)
         self.hint.config(text=f"[{req}] {desc}{extra}")
@@ -216,7 +216,7 @@ class TemplateCropper(tk.Toplevel):
         self.update()
         try:
             for i in range(n):
-                self.after(350)
+                self.after(800)  # 5 quadros x 0,8 s ≈ 4 s: cobre um ciclo inteiro do balanço
                 frame = self.capture_cb()
                 if frame is None or frame.shape != self.img.shape:
                     break
@@ -341,17 +341,22 @@ class DetectionTester(tk.Toplevel):
         except (tk.TclError, ValueError):
             thr = self.detector.threshold_for(cat)
         self.detector.library.invalidate()
-        matches = self.detector.find_all(self.img, cat, thr)
+        matches, rejected = self.detector.find_all_explained(self.img, cat, thr)
         info = self.detector.diagnose(self.img, cat)
-        txt = f"{len(matches)} encontrado(s) com limiar {thr:.2f}.  " + self.detector.describe(cat, info)
+        txt = (f"{len(matches)} aceito(s) com limiar {thr:.2f}, {len(rejected)} descartado(s).  "
+               + self.detector.describe(cat, info))
         if matches:
-            txt += "\n" + ", ".join(str(m) for m in matches[:12])
+            txt += "\nAceitos: " + ", ".join(str(m) for m in matches[:12])
         elif info["templates"] and info.get("best_zoom_score", 0) >= thr:
             txt += "\n→ O elemento existe com outro zoom de câmera; clique em 'Calibrar zoom'."
         elif info["templates"] and info.get("best_rejected", 0) >= thr:
             txt += "\n→ Forma igual mas cor/brilho diferentes: há uma janela escurecendo a tela?"
+        for m, why in rejected[:8]:  # laranja na imagem
+            txt += f"\n  descartado {m.center} ({m.score:.2f}): {why}"
         self.result.config(text=txt)
-        self._show(self.detector.annotate(self.img, matches))
+        shown = self.detector.annotate(self.img, matches)
+        shown = self.detector.annotate(shown, [m for m, _ in rejected], color=(0, 165, 255))
+        self._show(shown)
 
     def calibrate(self):
         if self.img is None:

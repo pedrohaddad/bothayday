@@ -114,9 +114,63 @@ class Match:
     def same_spot(self, other, factor=0.5):
         return self.distance(other) < min(self.w, self.h, other.w, other.h) * factor
 
+    def iso_distance(self, other):
+        """Distância em 'losango' normalizada pelo tamanho médio dos dois templates.
+
+        Num grid isométrico (campos do Hay Day) o vizinho mais próximo fica a meia largura E
+        meia altura: |dx|/w + |dy|/h >= 1. Ecos da mesma plantação ficam abaixo de 1.
+        """
+        (ax, ay), (bx, by) = self.center, other.center
+        w = (self.w + other.w) / 2.0
+        h = (self.h + other.h) / 2.0
+        return abs(ax - bx) / max(1.0, w) + abs(ay - by) / max(1.0, h)
+
     def __str__(self):
         cx, cy = self.center
         return f"{self.category}@({cx},{cy}) {self.score:.2f}"
+
+
+def grid_spacing(matches):
+    """Espaçamento do grid (mediana da distância em losango ao vizinho mais próximo)."""
+    if len(matches) < 2:
+        return None
+    return float(np.median([min(m.iso_distance(o) for o in matches if o is not m) for m in matches]))
+
+
+def grid_dedupe(matches, rejects=None, min_items=4, ratio=0.6, spacing=None):
+    """2ª etapa do NMS para plantações, baseada no ESPAÇAMENTO REAL do grid.
+
+    O 1º NMS mede distância em unidades do template; com um recorte pequeno (miolo) o campo
+    vizinho fica a ~3 unidades e um 'eco' da textura dentro do mesmo campo a ~1,2 — ambos
+    passariam. Aqui o espaçamento do grid é medido nas próprias detecções (mediana da
+    distância ao vizinho mais próximo) e só se removem pares bem mais próximos que isso.
+    Com recortes do tamanho do campo o espaçamento é ~1 e nada é removido.
+    """
+    if spacing is None:
+        if len(matches) < min_items:
+            return list(matches)
+        spacing = grid_spacing(matches)
+    if spacing is None or spacing <= 1.3:
+        return list(matches)
+    limit = ratio * spacing
+    kept = []
+    for m in sorted(matches, key=lambda m: -m.score):
+        near = next((k for k in kept if m.iso_distance(k) < limit), None)
+        if near is None:
+            kept.append(m)
+        elif rejects is not None:
+            rejects.append((m, f"eco da plantação em {near.center} (distância {m.iso_distance(near):.2f} "
+                               f"< {ratio:.0%} do espaçamento do grid {spacing:.2f})"))
+    return kept
+
+
+def diamond_mask(w, h, grow=1.0):
+    """Máscara 3 canais com o losango inscrito no retângulo (formato de um campo isométrico)."""
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    cx, cy = (w - 1) / 2.0, (h - 1) / 2.0
+    inside = (np.abs(xx - cx) / max(1.0, w / 2.0) + np.abs(yy - cy) / max(1.0, h / 2.0)) <= grow
+    m = inside.astype(np.uint8) * 255
+    return cv2.merge([m, m, m])
 
 
 @dataclass
@@ -165,6 +219,15 @@ class TemplateLibrary:
         return tuple(sig)
 
     def get(self, category):
+        templates = self._get(category)
+        if category in FIELD_CATEGORIES:
+            for t in templates:
+                if t.mask is None and not getattr(t, "_auto_mask", False):
+                    t.mask = diamond_mask(t.image.shape[1], t.image.shape[0])
+                    t._auto_mask = True
+        return templates
+
+    def _get(self, category):
         with self._lock:
             now = time.monotonic()
             cached = self._cache.get(category)
@@ -238,6 +301,11 @@ WORLD_CATEGORIES = ("farm", "wheat_empty", "wheat_ready", "wheat_growing", "shop
 # fora porque pode ser um ícone do HUD (não muda com o zoom) ou uma construção (muda).
 # Ordem = confiabilidade para medir o zoom (estáticos primeiro; o trigo maduro balança).
 ZOOM_REFERENCE = ("wheat_empty", "shop", "wheat_growing", "wheat_ready")
+# Plantações: recebem máscara automática em losango (o que está EM VOLTA do campo — grama,
+# outros campos, cercas — muda de campo para campo e não deve contar na comparação).
+FIELD_CATEGORIES = ("wheat_empty", "wheat_ready", "wheat_growing")
+# Dois candidatos da mesma categoria com iso_distance menor que isto são a mesma plantação.
+DUPLICATE_ISO_DISTANCE = 1.0
 
 
 class ImageDetector:
@@ -274,12 +342,15 @@ class ImageDetector:
         self._last_calibration = {}
         self._scaled_cache = {}
         self._prep = (None, {})  # (imagem original, {sigma: imagem suavizada})
+        # espaçamento do grid de plantações medido com TODAS as plantações (bot.scan_fields)
+        self.field_spacing = None
 
     # ------------------------------------------------------------ utilidades
     def threshold_for(self, category):
         return float(self.thresholds.get(category, self.threshold))
 
     def reset_calibration(self):
+        self.field_spacing = None
         self.learned.clear()
         self.world_zoom = None
         self._last_calibration.clear()
@@ -382,8 +453,20 @@ class ImageDetector:
                 uniq.append(f)
         return uniq
 
+    @staticmethod
+    def _peaks(res, thr, tw, th, limit=300):
+        """Máximos locais de res >= thr (não apaga vizinhos: cada plantação tem seu próprio pico)."""
+        kw = max(3, (tw // 3) | 1)
+        kh = max(3, (th // 3) | 1)
+        dil = cv2.dilate(res, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kw, kh)))
+        ys, xs = np.where((res >= thr) & (res >= dil - 1e-6))
+        if len(xs) > limit:
+            order = np.argsort(res[ys, xs])[::-1][:limit]
+            ys, xs = ys[order], xs[order]
+        return [(int(x), int(y), float(res[y, x])) for y, x in zip(ys, xs)]
+
     def _candidates(self, img, category, thr, region, per_template, factors=None, stats_out=None,
-                    max_templates=None):
+                    max_templates=None, rejects=None, near_miss=0.0, use_mask=True):
         templates = self.library.get(category)[:max_templates]
         if img is None or not templates:
             return []
@@ -399,6 +482,7 @@ class ImageDetector:
         sh, sw = raw.shape[:2]
         base = img.shape[1] / float(self.template_width)
         cands = []
+        low = thr - near_miss if rejects is not None else thr
         for tpl in templates:
             for f in (factors or self.factors(category)):
                 t_prep, t_mask, t_raw, t_stats, sigma = self._scaled(tpl, base * f, img.shape[1])
@@ -408,38 +492,63 @@ class ImageDetector:
                 prep = self._prepared(img, sigma)
                 if region_slice is not None:
                     prep = prep[region_slice]
-                res = self._match(prep, t_prep, t_mask)
-                found = tries = 0
-                while found < per_template and tries < per_template * 4 + 8:
-                    tries += 1
-                    _, maxv, _, (mx, my) = cv2.minMaxLoc(res)
-                    if maxv < thr:
+                # Plantações cortadas pela borda da tela: estende a imagem em 1/3 do template
+                # (com a máscara em losango só a ponta fica de fora; o centro continua na tela).
+                px = py = 0
+                vraw = raw
+                if category in FIELD_CATEGORIES and region_slice is None:
+                    px, py = tw // 3, th // 3
+                    prep = cv2.copyMakeBorder(prep, py, py, px, px, cv2.BORDER_REPLICATE)
+                    vraw = cv2.copyMakeBorder(raw, py, py, px, px, cv2.BORDER_REPLICATE)
+                res = self._match(prep, t_prep, t_mask if use_mask else None)
+                peaks = sorted(self._peaks(res, low, tw, th), key=lambda p: -p[2])
+                found = 0
+                for mx, my, score in peaks:
+                    if found >= per_template:
                         break
-                    x0, y0 = max(0, mx - tw // 2), max(0, my - th // 2)
-                    res[y0:my + th // 2 + 1, x0:mx + tw // 2 + 1] = -1.0
-                    ok = self._verify(raw, mx, my, t_raw, t_mask, t_stats)
-                    if stats_out is not None:
-                        stats_out.append((float(maxv), ok, f))
-                    if not ok:
+                    m = Match(category, mx - px + ox, my - py + oy, tw, th, score, tpl.name, f)
+                    ok = self._verify(vraw, mx, my, t_raw, t_mask, t_stats)
+                    if score < thr:
+                        # "quase": só interessa ao diagnóstico se TAMBÉM tem a cor do elemento
+                        if ok:
+                            rejects.append((m, f"pontuação {score:.2f} abaixo do limiar {thr:.2f}"))
                         continue
-                    cands.append(Match(category, mx + ox, my + oy, tw, th, float(maxv), tpl.name, f))
+                    if stats_out is not None:
+                        stats_out.append((score, ok, f))
+                    if not ok:
+                        if rejects is not None:
+                            rejects.append((m, f"cor/brilho diferente (pontuação {score:.2f})"))
+                        continue
+                    cands.append(m)
                     found += 1
         return cands
 
     @staticmethod
-    def _nms(cands, max_results):
+    def _nms(cands, max_results, rejects=None):
+        """Remove duplicatas da MESMA plantação (distância em losango < 1), mantendo a melhor.
+
+        Vizinhos reais num grid isométrico ficam a >= 1 e nunca são eliminados.
+        """
         cands.sort(key=lambda m: m.score, reverse=True)
         kept = []
         for c in cands:
-            if all(not c.same_spot(k) for k in kept):
-                kept.append(c)
+            dup = next((k for k in kept if c.iso_distance(k) < DUPLICATE_ISO_DISTANCE), None)
+            if dup is None:
                 if len(kept) >= max_results:
-                    break
+                    if rejects is not None:
+                        rejects.append((c, f"limite de {max_results} resultados"))
+                    continue
+                kept.append(c)
+            elif rejects is not None and c.distance(dup) > 0.25 * min(dup.w, dup.h):
+                # eco deslocado dentro da mesma plantação (o mesmo ponto visto por outro quadro
+                # da animação não é informativo e não é registrado)
+                rejects.append((c, f"eco/duplicado da plantação em {dup.center}"))
         return kept
 
     # ----------------------------------------------------------- zoom (mundo)
-    def _best_at(self, img, category, factor, max_templates=None):
-        found = self._candidates(img, category, 0.3, None, 3, factors=[factor], max_templates=max_templates)
+    def _best_at(self, img, category, factor, max_templates=None, use_mask=True):
+        found = self._candidates(img, category, 0.3, None, 1, factors=[factor], max_templates=max_templates,
+                                 use_mask=use_mask)
         return max((m.score for m in found), default=0.0)
 
     def calibrate(self, img, category, threshold=None):
@@ -453,12 +562,12 @@ class ImageDetector:
         base = img.shape[1] / float(self.template_width)
         smallest = min(min(t.image.shape[:2]) for t in templates) * base * lo
         # Busca grossa em meia resolução (4x menos pixels) quando os templates são grandes o bastante.
-        coarse_img = cv2.pyrDown(img) if smallest >= 24 else img
+        coarse_img = cv2.pyrDown(img) if smallest >= 16 else img
         best_f, best_s = None, 0.0
         for f in np.arange(lo, hi + 1e-6, 0.05):
             if self.abort_check and self.abort_check():
                 return None, 0.0
-            s = self._best_at(coarse_img, category, float(f), max_templates=2)
+            s = self._best_at(coarse_img, category, float(f), max_templates=2, use_mask=False)
             if s > best_s:
                 best_f, best_s = float(f), s
         if best_f is None:
@@ -507,15 +616,15 @@ class ImageDetector:
         zoom = None
         if cats:
             smallest = min(min(t.image.shape[:2]) for c in cats for t in self.library.get(c)) * base * lo
-            coarse_img = cv2.pyrDown(img) if smallest >= 24 else img
-            zs = [float(z) for z in np.arange(lo, hi + 1e-6, 0.05)]
+            coarse_img = cv2.pyrDown(img) if smallest >= 16 else img
+            zs = [float(z) for z in np.arange(lo, hi + 1e-6, 0.08)]
             curves = {}
             for c in cats:
                 curve = []
                 for z in zs:
                     if self.abort_check and self.abort_check():
                         return None
-                    curve.append(self._best_at(coarse_img, c, z, max_templates=2))
+                    curve.append(self._best_at(coarse_img, c, z, max_templates=2, use_mask=False))
                 curves[c] = curve
             thr = min(self.threshold_for(c) for c in cats)
             present = [c for c in cats if max(curves[c]) >= thr - 0.05]
@@ -523,17 +632,18 @@ class ImageDetector:
                 mean = np.mean([curves[c] for c in present], axis=0)
                 z0 = zs[int(np.argmax(mean))]
 
-                def score(z):
-                    return float(np.mean([self._best_at(img, c, z) for c in present]))
+                def score(z, im=coarse_img):
+                    return float(np.mean([self._best_at(im, c, z, max_templates=3, use_mask=False)
+                                          for c in present]))
                 best_z, best_s = z0, -1.0
-                for z in np.arange(z0 - 0.04, z0 + 0.0401, 0.02):
+                for z in np.arange(z0 - 0.06, z0 + 0.0601, 0.02):
                     if self.abort_check and self.abort_check():
                         return None
                     sc = score(float(z))
                     if sc > best_s:
                         best_z, best_s = float(z), sc
                 for f in self.scales:  # prefere a escala do config se praticamente empata
-                    if score(float(f)) >= best_s - 0.03:
+                    if abs(f - best_z) < 0.25 and score(float(f)) >= best_s - 0.03:
                         best_z = float(f)
                         break
                 if max(self._best_at(img, c, best_z) for c in present) >= thr:
@@ -551,6 +661,8 @@ class ImageDetector:
     def find_all(self, img, category, threshold=None, region=None, max_results=40):
         thr = self.threshold_for(category) if threshold is None else float(threshold)
         found = self._nms(self._candidates(img, category, thr, region, max_results), max_results)
+        if category in FIELD_CATEGORIES:
+            found = grid_dedupe(found, min_items=6, spacing=self.field_spacing)
         if found and self.world_zoom is None and category in ZOOM_REFERENCE:
             # 1º elemento do mundo visto nesta sessão: confirma o zoom pela MELHOR escala,
             # medida no elemento mais estável visível (solo vazio > banca > trigo).
@@ -560,6 +672,29 @@ class ImageDetector:
                 self.world_zoom = round(found[0].scale, 3)
             found = self._nms(self._candidates(img, category, thr, region, max_results), max_results)
         return found
+
+    def find_all_explained(self, img, category, threshold=None, near_miss=0.10, max_results=60):
+        """Como find_all, mas também devolve [(Match, motivo)] dos candidatos descartados:
+        pontuação logo abaixo do limiar, cor/brilho diferente ou duplicado da mesma plantação."""
+        thr = self.threshold_for(category) if threshold is None else float(threshold)
+        rejects = []
+        cands = self._candidates(img, category, thr, None, max_results, rejects=rejects, near_miss=near_miss)
+        found = self._nms(cands, max_results, rejects)
+        if category in FIELD_CATEGORIES:
+            found = grid_dedupe(found, rejects, min_items=6, spacing=self.field_spacing)
+        if found and self.world_zoom is None and category in ZOOM_REFERENCE and self.auto_zoom:
+            self.calibrate_world(img, force=True)  # 1ª vez: confirma o zoom e refaz a análise
+            if self.world_zoom is not None:
+                return self.find_all_explained(img, category, threshold, near_miss, max_results)
+        # um rejeitado no mesmo lugar de um aceito (ou de outro rejeitado) é o mesmo objeto
+        clean, seen = [], []
+        for m, why in sorted(rejects, key=lambda r: -r[0].score):
+            if not why.startswith("eco") and any(m.iso_distance(k) < DUPLICATE_ISO_DISTANCE
+                                                 for k in found + seen):
+                continue
+            seen.append(m)
+            clean.append((m, why))
+        return found, clean
 
     def find(self, img, category, threshold=None, region=None):
         found = self.find_all(img, category, threshold, region, max_results=1)
