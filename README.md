@@ -4,6 +4,8 @@ Bot com interface gráfica que controla o Hay Day rodando em um emulador Android
 e reconhece a tela por **template matching (OpenCV)**. Ele planta trigo, espera crescer, colhe,
 coloca à venda na banca, cria anúncios e recolhe o dinheiro, em ciclo contínuo.
 
+> 📘 **Primeira vez? Siga o [GUIA_PASSO_A_PASSO.md](GUIA_PASSO_A_PASSO.md)**: o que fazer e onde fazer, do download até o bot rodando.
+
 > ⚠️ **Aviso:** automatizar o Hay Day viola os Termos de Serviço da Supercell e pode levar ao
 > banimento da conta. Use por sua conta e risco, de preferência em uma conta secundária.
 
