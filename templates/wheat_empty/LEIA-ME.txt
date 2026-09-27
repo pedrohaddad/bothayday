@@ -1,0 +1,8 @@
+Pasta: wheat_empty  [OBRIGATÓRIO]
+
+Campo VAZIO (terra arada marrom, sem nada plantado). Recorte só o miolo da terra (~60x40 px), sem as bordas de grama, para casar com qualquer campo.
+
+Coloque aqui um ou mais recortes .png tirados de screenshots do
+emulador NA MESMA RESOLUÇÃO configurada em 'template_resolution'.
+Várias imagens = variações aceitas do mesmo elemento.
+PNG com transparência: as áreas transparentes são ignoradas.

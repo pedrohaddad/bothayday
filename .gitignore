@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+build/
+dist/
+*.spec
+.pytest_cache/
+logs/*.log
+screenshots/*.png
+screenshots/errors/*.png
+config.json.tmp
+config.json.corrompido

@@ -1,0 +1,8 @@
+Pasta: confirm  [opcional]
+
+Botões de CONFIRMAÇÃO (OK/Sim) usados após criar um anúncio. NUNCA recorte botões verdes que gastam diamantes.
+
+Coloque aqui um ou mais recortes .png tirados de screenshots do
+emulador NA MESMA RESOLUÇÃO configurada em 'template_resolution'.
+Várias imagens = variações aceitas do mesmo elemento.
+PNG com transparência: as áreas transparentes são ignoradas.

@@ -1,0 +1,8 @@
+Pasta: shop_screen  [recomendado]
+
+Marcador da janela da BANCA aberta, ex.: o título/faixa superior da janela.
+
+Coloque aqui um ou mais recortes .png tirados de screenshots do
+emulador NA MESMA RESOLUÇÃO configurada em 'template_resolution'.
+Várias imagens = variações aceitas do mesmo elemento.
+PNG com transparência: as áreas transparentes são ignoradas.

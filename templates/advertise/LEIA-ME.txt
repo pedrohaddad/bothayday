@@ -1,0 +1,8 @@
+Pasta: advertise  [opcional (anúncios)]
+
+Opção de ANUNCIAR disponível: a caixa 'Anunciar' DESMARCADA na janela de venda e/ou o botão 'Criar anúncio' que aparece ao tocar num caixote à venda.
+
+Coloque aqui um ou mais recortes .png tirados de screenshots do
+emulador NA MESMA RESOLUÇÃO configurada em 'template_resolution'.
+Várias imagens = variações aceitas do mesmo elemento.
+PNG com transparência: as áreas transparentes são ignoradas.

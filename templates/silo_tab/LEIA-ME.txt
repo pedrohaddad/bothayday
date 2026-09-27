@@ -1,0 +1,8 @@
+Pasta: silo_tab  [opcional]
+
+Aba do SILO na janela de venda (se o trigo não aparecer direto).
+
+Coloque aqui um ou mais recortes .png tirados de screenshots do
+emulador NA MESMA RESOLUÇÃO configurada em 'template_resolution'.
+Várias imagens = variações aceitas do mesmo elemento.
+PNG com transparência: as áreas transparentes são ignoradas.

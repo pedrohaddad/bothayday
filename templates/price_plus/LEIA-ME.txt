@@ -1,0 +1,8 @@
+Pasta: price_plus  [opcional]
+
+Botão '+' do PREÇO na janela de venda.
+
+Coloque aqui um ou mais recortes .png tirados de screenshots do
+emulador NA MESMA RESOLUÇÃO configurada em 'template_resolution'.
+Várias imagens = variações aceitas do mesmo elemento.
+PNG com transparência: as áreas transparentes são ignoradas.

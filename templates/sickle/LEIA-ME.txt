@@ -1,0 +1,8 @@
+Pasta: sickle  [OBRIGATÓRIO]
+
+Ícone da FOICE que aparece ao tocar num campo com trigo pronto.
+
+Coloque aqui um ou mais recortes .png tirados de screenshots do
+emulador NA MESMA RESOLUÇÃO configurada em 'template_resolution'.
+Várias imagens = variações aceitas do mesmo elemento.
+PNG com transparência: as áreas transparentes são ignoradas.

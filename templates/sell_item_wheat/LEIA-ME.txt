@@ -1,0 +1,8 @@
+Pasta: sell_item_wheat  [obrigatório p/ vender]
+
+Ícone do TRIGO na lista de itens da janela de venda (lado esquerdo).
+
+Coloque aqui um ou mais recortes .png tirados de screenshots do
+emulador NA MESMA RESOLUÇÃO configurada em 'template_resolution'.
+Várias imagens = variações aceitas do mesmo elemento.
+PNG com transparência: as áreas transparentes são ignoradas.

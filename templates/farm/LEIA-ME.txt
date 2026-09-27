@@ -1,0 +1,8 @@
+Pasta: farm  [OBRIGATÓRIO]
+
+Marcador da tela da FAZENDA sem nenhuma janela aberta. Recorte um ícone fixo do HUD que só aparece na fazenda, ex.: o botão de engrenagem (configurações) ou o botão da loja/caminhão no canto inferior. Não use números (moedas/XP), pois mudam.
+
+Coloque aqui um ou mais recortes .png tirados de screenshots do
+emulador NA MESMA RESOLUÇÃO configurada em 'template_resolution'.
+Várias imagens = variações aceitas do mesmo elemento.
+PNG com transparência: as áreas transparentes são ignoradas.
