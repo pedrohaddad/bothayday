@@ -68,6 +68,10 @@ DEFAULT_CONFIG = {
     "match_threshold": 0.80,
     "thresholds": {},
     "scales": [1.0],
+    "match_blur": 2.0,
+    "color_tolerance": 30,
+    "auto_zoom": True,
+    "zoom_range": [0.6, 1.6],
     # --- Arrasto (plantar/colher) ---
     "drag_mode": "auto",
     "drag_hold": 0.25,
@@ -87,10 +91,11 @@ _NUMERIC_KEYS_INT = {
     "restart_game_after_failures", "freeze_timeout", "max_same_spot_taps",
     "drag_step_px", "swipe_duration_ms",
 }
-_NUMERIC_KEYS_FLOAT = {"check_interval", "action_delay", "match_threshold", "drag_hold"}
+_NUMERIC_KEYS_FLOAT = {"check_interval", "action_delay", "match_threshold", "drag_hold",
+                       "match_blur", "color_tolerance"}
 _BOOL_KEYS = {
     "sell_enabled", "advertise_enabled", "collect_money_enabled",
-    "screenshot_on_error", "debug_log",
+    "screenshot_on_error", "debug_log", "auto_zoom",
 }
 CHOICES = {
     "price_mode": ["default", "max", "plus", "minus"],
@@ -174,6 +179,14 @@ def normalize(cfg):
     except (TypeError, ValueError):
         scales = []
     out["scales"] = scales or [1.0]
+    out["match_blur"] = min(6.0, max(0.0, out["match_blur"]))
+    out["color_tolerance"] = min(255.0, max(5.0, out["color_tolerance"]))
+    zr = out.get("zoom_range")
+    try:
+        lo, hi = sorted((float(zr[0]), float(zr[1])))
+        out["zoom_range"] = [max(0.3, lo), min(3.0, hi)] if hi > lo else list(DEFAULT_CONFIG["zoom_range"])
+    except (TypeError, ValueError, IndexError):
+        out["zoom_range"] = list(DEFAULT_CONFIG["zoom_range"])
     tp = out.get("test_tap_point")
     try:
         out["test_tap_point"] = [int(tp[0]), int(tp[1])]

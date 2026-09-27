@@ -12,7 +12,7 @@ from tkinter import filedialog, messagebox, scrolledtext, ttk
 import config as cfgmod
 from adb_controller import ADBController, ADBError
 from bot import HayDayBot
-from image_detector import TEMPLATE_CATEGORIES, ImageDetector, TemplateLibrary
+from image_detector import TEMPLATE_CATEGORIES, TemplateLibrary, build_detector
 from logger_setup import get_logger, gui_log_queue, set_debug
 from screen import Screen
 
@@ -69,6 +69,10 @@ SETTINGS = [
         ("match_threshold", "Limiar padrão de semelhança (0.3–0.99)", "float"),
         ("template_resolution", "Resolução em que os templates foram recortados", "str"),
         ("scales", "Escalas extras (ex.: 1.0, 0.9, 1.1)", "list"),
+        ("match_blur", "Suavização (tolera animação/câmera; 0 desliga) — padrão 2.0", "float"),
+        ("color_tolerance", "Tolerância de cor/brilho (rejeita telas escurecidas) — padrão 30", "float"),
+        ("auto_zoom", "Detectar o zoom da câmera automaticamente", "bool"),
+        ("zoom_range", "Faixa de zoom procurada (ex.: 0.6, 1.6)", "list"),
         ("thresholds", "Limiar por pasta (JSON, ex.: {\"wheat_ready\": 0.75})", "json"),
     ]),
     ("Arrasto (plantar/colher)", [
@@ -107,6 +111,7 @@ class App(tk.Tk):
         self.connected = False
         self.conn_error = False
         self.last_screenshot = None
+        self.last_screenshot_source = ""
         self.ui_queue = queue.Queue()
         self.vars = {}
         self._busy = False
@@ -529,7 +534,7 @@ class App(tk.Tk):
             self.device_box["values"] = online
             self.vars["device"][0].set(device)
             self.on_save(quiet=True)
-            self.last_screenshot = img
+            self._set_last(img, "CONECTAR")
             h, w = img.shape[:2]
             self.conn_info.config(text=f"Conexão: OK — {device} ({w}x{h})", foreground="#1e8449")
             log.info("ADB conectado: %s (%s) tela %dx%d", device, ver, w, h)
@@ -580,12 +585,18 @@ class App(tk.Tk):
                 messagebox.showerror("Teste ADB", str(err), parent=self)
                 return
             text, img = res
-            self.last_screenshot = img
+            self._set_last(img, "TESTAR ADB")
             self.connected, self.conn_error = True, False
             self.conn_info.config(text=f"Conexão: OK — {adb.device}", foreground="#1e8449")
             log.info("Teste ADB:\n%s", text)
             messagebox.showinfo("Teste ADB", text, parent=self)
         self.run_bg(work, done)
+
+    def _set_last(self, img, source):
+        import datetime
+        self.last_screenshot = img
+        h, w = img.shape[:2]
+        self.last_screenshot_source = f"{source} às {datetime.datetime.now():%H:%M:%S} ({w}x{h})"
 
     def capture_now(self):
         """Captura síncrona usada pelas janelas de templates."""
@@ -596,7 +607,7 @@ class App(tk.Tk):
                 raise ADBError("Nenhum dispositivo conectado.")
             adb.device = online[0]
         img = adb.screencap()
-        self.last_screenshot = img
+        self._set_last(img, "captura do emulador")
         return img
 
     def on_capture(self):
@@ -668,24 +679,24 @@ class App(tk.Tk):
         open_path(path)
 
     def _tool_detector(self):
-        from config import parse_resolution
-        tw, _ = parse_resolution(self.cfg["template_resolution"])
-        return ImageDetector(self.library, self.cfg["match_threshold"], self.cfg["thresholds"],
-                             tw, self.cfg["scales"])
+        # Exatamente a mesma construção usada pelo bot (bot.py -> build_detector).
+        return build_detector(self.cfg, self.library)
 
     def on_cropper(self):
         from template_tools import TemplateCropper
         self.on_save(quiet=True)
         TemplateCropper(self, self.last_screenshot, cfgmod.TEMPLATES_DIR, cfgmod.SCREENSHOTS_DIR,
                         capture_cb=self.capture_now,
-                        on_saved=lambda cat, p: (log.info("Template salvo: %s", p), self.refresh_templates()))
+                        on_saved=lambda cat, p: (log.info("Template salvo: %s", p), self.refresh_templates()),
+                        source=getattr(self, "last_screenshot_source", ""))
 
     def on_tester(self):
         from template_tools import DetectionTester
         self.on_save(quiet=True)
         self.library.invalidate()
         DetectionTester(self, self.last_screenshot, self._tool_detector(), cfgmod.SCREENSHOTS_DIR,
-                        capture_cb=self.capture_now)
+                        capture_cb=self.capture_now,
+                        source=getattr(self, "last_screenshot_source", ""))
 
     def _clear_log(self):
         self.log_text.config(state="normal")

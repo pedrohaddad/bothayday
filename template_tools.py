@@ -8,7 +8,10 @@ from tkinter import filedialog, messagebox, ttk
 import cv2
 from PIL import Image, ImageTk
 
-from image_detector import TEMPLATE_CATEGORIES, imread_unicode, imwrite_unicode
+from image_detector import TEMPLATE_CATEGORIES, WORLD_CATEGORIES, imread_unicode, imwrite_unicode
+
+# Elementos animados (balançam/piscam): salvar vários quadros como variações.
+ANIMATED_DEFAULT = {"wheat_ready", "wheat_growing"}
 
 MAX_VIEW_W = 1100
 MAX_VIEW_H = 640
@@ -29,9 +32,10 @@ class TemplateCropper(tk.Toplevel):
     """Mostra um screenshot; arraste o mouse para selecionar e salve na pasta da categoria."""
 
     def __init__(self, master, image_bgr, templates_dir, screenshots_dir, capture_cb=None,
-                 on_saved=None):
+                 on_saved=None, source=""):
         super().__init__(master)
         self.title("Recortar template")
+        self.source = source
         self.templates_dir = templates_dir
         self.screenshots_dir = screenshots_dir
         self.capture_cb = capture_cb
@@ -57,6 +61,10 @@ class TemplateCropper(tk.Toplevel):
         ttk.Button(top, text="Abrir imagem...", command=self.open_image).pack(side="left", padx=4)
         if capture_cb:
             ttk.Button(top, text="Capturar nova", command=self.capture_new).pack(side="left", padx=4)
+        self.frames_var = tk.IntVar(value=0)
+        if capture_cb:
+            ttk.Label(top, text="Quadros extras da animação:").pack(side="left", padx=(10, 0))
+            ttk.Spinbox(top, from_=0, to=8, textvariable=self.frames_var, width=3).pack(side="left", padx=2)
 
         self.hint = ttk.Label(self, text="", wraplength=1050, foreground="#555", padding=(6, 0))
         self.hint.pack(fill="x")
@@ -90,7 +98,15 @@ class TemplateCropper(tk.Toplevel):
     def _update_hint(self):
         cat = self.cat_var.get()
         req, desc = TEMPLATE_CATEGORIES.get(cat, ("personalizado", "Categoria personalizada."))
-        self.hint.config(text=f"[{req}] {desc}")
+        extra = ""
+        if cat in ANIMATED_DEFAULT:
+            extra = ("  • Elemento ANIMADO: salve com 4 quadros extras (a câmera não pode se mexer "
+                     "durante a captura).")
+            if self.capture_cb:
+                self.frames_var.set(4)
+        elif self.capture_cb:
+            self.frames_var.set(0)
+        self.hint.config(text=f"[{req}] {desc}{extra}")
 
     def set_image(self, img):
         self.img = img
@@ -101,7 +117,8 @@ class TemplateCropper(tk.Toplevel):
         self.sel = None
         self._rect = None
         h, w = img.shape[:2]
-        self.info.config(text=f"Imagem {w}x{h} (exibida a {self.scale:.0%}). "
+        src = f" — origem: {self.source}" if self.source else ""
+        self.info.config(text=f"Imagem {w}x{h} (exibida a {self.scale:.0%}){src}. "
                               "Arraste para selecionar a área.")
 
     def open_image(self):
@@ -112,6 +129,7 @@ class TemplateCropper(tk.Toplevel):
             if img is None:
                 messagebox.showerror("Erro", "Não foi possível abrir a imagem.", parent=self)
             else:
+                self.source = os.path.basename(path)
                 self.set_image(img)
 
     def capture_new(self):
@@ -121,6 +139,7 @@ class TemplateCropper(tk.Toplevel):
             messagebox.showerror("Erro", f"Falha ao capturar: {exc}", parent=self)
             return
         if img is not None:
+            self.source = "nova captura"
             self.set_image(img)
 
     def _press(self, e):
@@ -170,19 +189,81 @@ class TemplateCropper(tk.Toplevel):
                 "Substituir", f"{name} já existe. Substituir?", parent=self):
             return
         x1, y1, x2, y2 = self.sel
-        imwrite_unicode(path, self.img[y1:y2, x1:x2])
+        crop = self.img[y1:y2, x1:x2]
+        imwrite_unicode(path, crop)
+        saved = [path]
+        n_frames = 0
+        try:
+            n_frames = int(self.frames_var.get())
+        except (tk.TclError, ValueError):
+            pass
+        if n_frames > 0 and self.capture_cb:
+            saved += self._save_animation_frames(path, crop, n_frames)
         self.name_var.set("")
-        self.info.config(text=f"Salvo: {path}")
+        self.info.config(text=self._self_check(cat, crop, saved))
         if self.on_saved:
-            self.on_saved(cat, path)
+            for p in saved:
+                self.on_saved(cat, p)
+
+    def _save_animation_frames(self, path, crop, n):
+        """Captura mais telas e salva o MESMO retângulo como variações (quadros da animação)."""
+        x1, y1, x2, y2 = self.sel
+        base, ext = os.path.splitext(path)
+        g0 = cv2.GaussianBlur(crop, (0, 0), 1.5)
+        kept = [g0]
+        out = []
+        self.config(cursor="watch")
+        self.update()
+        try:
+            for i in range(n):
+                self.after(350)
+                frame = self.capture_cb()
+                if frame is None or frame.shape != self.img.shape:
+                    break
+                c = frame[y1:y2, x1:x2]
+                g = cv2.GaussianBlur(c, (0, 0), 1.5)
+                sim0 = float(cv2.matchTemplate(g, g0, cv2.TM_CCOEFF_NORMED).max())
+                if sim0 < 0.35:  # outro conteúdo: a câmera mexeu ou abriu uma janela
+                    break
+                if all(float(cv2.matchTemplate(g, k, cv2.TM_CCOEFF_NORMED).max()) < 0.985 for k in kept):
+                    p = f"{base}_q{i + 1}{ext}"
+                    imwrite_unicode(p, c)
+                    kept.append(g)
+                    out.append(p)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showwarning("Quadros da animação", f"Falha ao capturar quadros: {exc}", parent=self)
+        finally:
+            self.config(cursor="")
+        return out
+
+    def _self_check(self, cat, crop, saved):
+        """Confere se o template salvo é encontrado na própria imagem (mesmo detector do bot)."""
+        msg = f"Salvo: {os.path.basename(saved[0])}"
+        if len(saved) > 1:
+            msg += f" + {len(saved) - 1} quadro(s) da animação"
+        det = getattr(self.master, "_tool_detector", None)
+        if det is None:
+            return msg
+        try:
+            detector = det()
+            detector.library.invalidate()
+            info = detector.diagnose(self.img, cat)
+            ok = info["best"] >= info["threshold"]
+            msg += f".  Autoteste nesta imagem: {info['best']:.2f} " + ("✔" if ok else "✘ (veja o README)")
+            if min(crop.shape[:2]) < 12:
+                msg += "  • Recorte muito pequeno: prefira ≥ 20 px."
+        except Exception as exc:  # noqa: BLE001
+            msg += f" (autoteste falhou: {exc})"
+        return msg
 
 
 class DetectionTester(tk.Toplevel):
     """Roda o reconhecimento de uma categoria no screenshot e desenha os resultados."""
 
-    def __init__(self, master, image_bgr, detector, screenshots_dir, capture_cb=None):
+    def __init__(self, master, image_bgr, detector, screenshots_dir, capture_cb=None, source=""):
         super().__init__(master)
-        self.title("Testar detecção de templates")
+        self.title("Testar detecção de templates (mesmo detector do bot)")
+        self.source = source
         self.detector = detector
         self.screenshots_dir = screenshots_dir
         self.capture_cb = capture_cb
@@ -206,7 +287,10 @@ class DetectionTester(tk.Toplevel):
         ttk.Button(top, text="Abrir imagem...", command=self.open_image).pack(side="left", padx=4)
         if capture_cb:
             ttk.Button(top, text="Capturar nova", command=self.capture_new).pack(side="left", padx=4)
+        ttk.Button(top, text="Calibrar zoom", command=self.calibrate).pack(side="left", padx=4)
 
+        self.src_label = ttk.Label(self, text="", padding=(6, 0), foreground="#555")
+        self.src_label.pack(fill="x")
         self.result = ttk.Label(self, text="", padding=6, wraplength=1050, justify="left")
         self.result.pack(fill="x")
         self.view = ttk.Label(self)
@@ -224,6 +308,10 @@ class DetectionTester(tk.Toplevel):
         if img is None:
             self.result.config(text="Nenhuma imagem. Capture uma tela primeiro.")
             return
+        h, w = img.shape[:2]
+        zoom = self.detector.world_zoom
+        self.src_label.config(text=f"Imagem: {self.source or '-'} — {w}x{h}.  Zoom da câmera calibrado: "
+                                   f"{f'{zoom:.2f}x' if zoom else 'não'}")
         self.photo, _ = to_photo(img)
         self.view.config(image=self.photo)
 
@@ -232,6 +320,7 @@ class DetectionTester(tk.Toplevel):
                                           filetypes=[("Imagens", "*.png *.jpg *.jpeg *.bmp")])
         if path:
             self.img = imread_unicode(path, cv2.IMREAD_COLOR)
+            self.source = os.path.basename(path)
             self._show(self.img)
 
     def capture_new(self):
@@ -240,6 +329,7 @@ class DetectionTester(tk.Toplevel):
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("Erro", f"Falha ao capturar: {exc}", parent=self)
             return
+        self.source = "nova captura"
         self._show(self.img)
 
     def run(self):
@@ -250,18 +340,32 @@ class DetectionTester(tk.Toplevel):
             thr = float(self.thr_var.get())
         except (tk.TclError, ValueError):
             thr = self.detector.threshold_for(cat)
-        n_tpl = self.detector.library.count(cat)
+        self.detector.library.invalidate()
         matches = self.detector.find_all(self.img, cat, thr)
-        best = self.detector.best_score(self.img, cat)
-        txt = (f"'{cat}': {n_tpl} template(s), {len(matches)} encontrado(s) com limiar {thr:.2f}. "
-               f"Maior pontuação: {best:.3f}.")
+        info = self.detector.diagnose(self.img, cat)
+        txt = f"{len(matches)} encontrado(s) com limiar {thr:.2f}.  " + self.detector.describe(cat, info)
         if matches:
-            txt += "  " + ", ".join(str(m) for m in matches[:12])
-        elif n_tpl and best > 0:
-            txt += f"  Dica: para detectar, o limiar precisaria ser <= {best:.2f} " \
-                   "(abaixo de ~0.70 aumenta o risco de falso positivo)."
+            txt += "\n" + ", ".join(str(m) for m in matches[:12])
+        elif info["templates"] and info.get("best_zoom_score", 0) >= thr:
+            txt += "\n→ O elemento existe com outro zoom de câmera; clique em 'Calibrar zoom'."
+        elif info["templates"] and info.get("best_rejected", 0) >= thr:
+            txt += "\n→ Forma igual mas cor/brilho diferentes: há uma janela escurecendo a tela?"
         self.result.config(text=txt)
         self._show(self.detector.annotate(self.img, matches))
+
+    def calibrate(self):
+        if self.img is None:
+            return
+        self.detector.reset_calibration()
+        zoom = self.detector.calibrate_world(self.img, force=True)
+        lines = [f"zoom da câmera: {zoom:.2f}x" if zoom else "zoom da câmera: não determinado"]
+        for cat in WORLD_CATEGORIES:
+            if self.detector.library.has(cat):
+                ms = self.detector.find_all(self.img, cat)
+                best = max((m.score for m in ms), default=self.detector.best_score(self.img, cat))
+                lines.append(f"{cat}: {len(ms)} ({best:.2f})")
+        self.result.config(text="Calibração — " + " | ".join(lines))
+        self._show(self.img)
 
     def run_all(self):
         if self.img is None:
@@ -269,12 +373,13 @@ class DetectionTester(tk.Toplevel):
         colors = [(0, 0, 255), (0, 200, 0), (255, 0, 0), (0, 200, 255), (255, 0, 255), (255, 255, 0)]
         out = self.img
         lines = []
+        self.detector.library.invalidate()
         for i, cat in enumerate(self.detector.library.categories()):
             if not self.detector.library.has(cat):
                 continue
             ms = self.detector.find_all(self.img, cat)
-            best = self.detector.best_score(self.img, cat)
-            lines.append(f"{cat}: {len(ms)} (máx {best:.2f})")
+            best = max((m.score for m in ms), default=self.detector.best_score(self.img, cat))
+            lines.append(f"{cat}: {len(ms)} ({best:.2f})")
             out = self.detector.annotate(out, ms, colors[i % len(colors)])
         self.result.config(text=" | ".join(lines) or "Nenhum template cadastrado.")
         self._show(out)

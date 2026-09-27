@@ -160,12 +160,37 @@ porque dependem da resolução, do idioma e da versão do jogo.
 
 Cada pasta tem um `LEIA-ME.txt` com a mesma explicação.
 
+### Como o reconhecimento lida com o jogo real
+
+Entre dois screenshots do Hay Day muita coisa muda mesmo sem mexer em nada, e o
+`TM_CCOEFF_NORMED` puro derrubava a pontuação de um template perfeito para 0,5–0,75:
+
+| O que muda no jogo | Efeito no matching puro | Como o detector trata |
+|---|---|---|
+| **Zoom da câmera** (o jogo redefine ao abrir; a pinça muda) | campos/banca/casa ficam 10–25% maiores ou menores → 0,50–0,78 | **Calibração automática de zoom**: mede a escala da cena (0,6x–1,6x) combinando todos os elementos do mundo visíveis (texturas repetitivas como o solo sozinhas enganam) e aplica a todos eles. Roda ao encontrar a fazenda pela 1ª vez e quando campos/fazenda somem. Botões/menus (UI) não mudam com o zoom. |
+| **Posição da câmera em subpixel** (reamostragem bilinear) | texturas finas (sulcos, trigo) → 0,74–0,93 | Tela e template são **suavizados** (`match_blur`) antes da comparação. |
+| **Animação** (o trigo balança com o vento) | 0,57–0,77 com um único recorte | Suavização + **vários quadros da animação** na mesma pasta (o *Recortar template* captura sozinho). |
+| **Janela aberta por cima** (a fazenda fica escurecida) | CCOEFF ignora brilho → a fazenda era "encontrada" com popup aberto | **Verificação de cor/brilho** (`color_tolerance`) de cada candidato. |
+
+Resultado nos testes (`tests/test_detection.py`): elementos reais ≥ 0,82–0,99 em todos esses
+casos e regiões erradas ≤ ~0,5, então o **limiar 0,80 continua valendo** (não é preciso baixá-lo).
+
+Na aba *Templates → Testar detecção* (usa exatamente o mesmo detector do bot) a mensagem
+explica o resultado: melhor pontuação, escala testada, se algo foi rejeitado por cor/brilho
+e qual zoom faria o elemento aparecer. O botão **Calibrar zoom** aplica a calibração.
+
 ### Dicas para templates que funcionam
 - Recorte **na mesma resolução** configurada em `template_resolution` (padrão `1280x720`).
   Se o emulador tiver outra resolução, o bot escala os templates automaticamente, mas a precisão cai.
 - Recortes **pequenos e característicos** funcionam melhor que grandes. Evite incluir fundo
   que muda (grama, animais, sombras, números).
 - Coloque **várias imagens** na mesma pasta para variações (dia/noite, selecionado/não selecionado).
+- **Elementos animados** (`wheat_ready`, `wheat_growing`): no *Recortar template* deixe
+  "Quadros extras da animação" em 4 (já vem assim para essas pastas). Ele captura mais telas e
+  salva o mesmo retângulo como `nome_q1.png`, `nome_q2.png`… Não mexa na câmera enquanto isso.
+- Para `farm`, prefira um **ícone fixo do HUD** (não muda com o zoom). Uma construção também
+  funciona, graças à calibração de zoom, mas é menos estável.
+- Depois de salvar, o recortador faz um **autoteste** na própria imagem (deve dar ~1,00 ✔).
 - PNG com **transparência**: as áreas transparentes são ignoradas na comparação.
 - **Limiar** (`match_threshold`, padrão 0.80): se o elemento não é encontrado, baixe (0.70–0.75);
   se aparecem falsos positivos, suba. Use `thresholds` para ajustar por pasta, ex.:
@@ -249,6 +274,9 @@ Tudo pode ser alterado pela interface (aba *Configurações*). Principais chaves
 | `screenshot_on_error` | true | Salva screenshot em `screenshots/errors/` a cada erro. |
 | `hotkey` | `F8` | Tecla de parada de emergência. |
 | `match_threshold` / `thresholds` / `scales` | 0.80 / {} / [1.0] | Reconhecimento de imagem. |
+| `match_blur` | 2.0 | Suavização antes do matching (tolera animação e subpixel). Proporcional à resolução (vale para 640 px de largura). 0 desliga. |
+| `color_tolerance` | 30 | Diferença máxima de cor média (0–255) entre template e candidato. Rejeita a fazenda escurecida atrás de janelas. |
+| `auto_zoom` / `zoom_range` | true / [0.6, 1.6] | Calibração automática do zoom da câmera para campos, trigo, banca e `farm`. |
 | `drag_mode` | `auto` | `motionevent` (arrasto contínuo por todos os campos), `swipe` (campo a campo) ou `auto`. |
 | `drag_hold`, `drag_step_px`, `swipe_duration_ms` | 0.25 / 40 / 400 | Ajuste fino do arrasto. |
 
@@ -331,7 +359,8 @@ PyInstaller e da biblioteca de teclado global; adicione uma exceção se necess�
 | Nenhum dispositivo | Abra o emulador, clique em **Procurar emuladores** ou digite `127.0.0.1:21503` e clique **adb connect**. |
 | “adb server version doesn't match” | Feche outros programas com adb (Android Studio, outro emulador) e use o adb do próprio emulador. |
 | Dispositivo `unauthorized`/`offline` | Reinicie o emulador; em MuMu ative o ADB nas configurações. |
-| Campos não encontrados | Use **Testar detecção** com um screenshot atual; recorte de novo o miolo do campo; baixe o limiar desse template. |
+| Campos/fazenda não encontrados | Use **Testar detecção** com um screenshot atual e leia a mensagem: se indicar outro zoom, clique **Calibrar zoom**; se indicar rejeição por cor/brilho, há uma janela aberta. O log do `OPEN_GAME` mostra o mesmo diagnóstico. |
+| Trigo pronto oscila entre achado/não achado | Recorte de novo com 4 quadros extras da animação. |
 | Planta/colhe só alguns campos | Aumente `drag_hold`, reduza `drag_step_px` ou use `drag_mode = swipe`. |
 | Clica em coisa errada | Suba o limiar da pasta em `thresholds` ou recorte uma área mais característica. |
 | F8 não funciona com o emulador em foco | Execute o bot como administrador (a biblioteca `keyboard` pode precisar) ou use o botão PARAR. |

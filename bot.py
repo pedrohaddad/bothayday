@@ -8,7 +8,7 @@ import time
 
 from adb_controller import ADBController, ADBError, ADBInterrupted, DeviceLost
 from config import parse_resolution
-from image_detector import ImageDetector, TemplateLibrary
+from image_detector import TemplateLibrary, build_detector
 from logger_setup import get_logger
 from screen import Screen
 from state_machine import BotStopped, FatalError, State, StateMachine, StepFailed
@@ -79,9 +79,7 @@ class HayDayBot:
         self.adb = ADBController(self.cfg["adb_path"], self.cfg["device"],
                                  self.cfg["adb_timeout"], self.stop_event)
         self.library = TemplateLibrary(templates_dir)
-        tw, _ = parse_resolution(self.cfg["template_resolution"])
-        self.detector = ImageDetector(self.library, self.cfg["match_threshold"],
-                                      self.cfg["thresholds"], tw, self.cfg["scales"])
+        self.detector = build_detector(self.cfg, self.library, abort_check=self.stop_event.is_set)
         self.screen = Screen(self.adb, screenshots_dir)
         self.stats = BotStats()
         self.status = self.STATUS_STOPPED
@@ -312,7 +310,19 @@ class HayDayBot:
     # ================================================================ navegação
     def is_farm(self, img):
         if self.library.has("farm"):
-            return self.detector.find(img, "farm") is not None
+            if self.detector.find(img, "farm") is not None:
+                return True
+            # Plano B: o marcador falhou, mas 2+ elementos que só existem na fazenda aparecem
+            # (a verificação de brilho já descarta a fazenda escurecida atrás de uma janela).
+            seen = [c for c in ("shop", "wheat_empty", "wheat_ready", "wheat_growing")
+                    if self.library.has(c) and self.detector.find(img, c) is not None]
+            if len(seen) >= 2:
+                if "farm_fallback" not in self._warned:
+                    self._warned.add("farm_fallback")
+                    log.warning("Template 'farm' não reconhecido, mas a fazenda foi identificada por %s. "
+                                "Recorte um ícone fixo do HUD para 'farm' (veja o README).", ", ".join(seen))
+                return True
+            return False
         self.has_template("farm")  # registra o aviso uma vez
         return any(self.library.has(c) and self.detector.find(img, c) is not None
                    for c in ("shop", "wheat_empty", "wheat_ready", "wheat_growing"))
@@ -534,6 +544,8 @@ class HayDayBot:
         pkg = self.cfg["game_package"]
         if not self.adb.is_package_installed(pkg):
             raise FatalError(f"O pacote {pkg} (Hay Day) não está instalado no emulador")
+        # Ao (re)abrir, o jogo redefine o zoom da câmera: recalibra.
+        self.detector.reset_calibration()
         if self.force_restart:
             self.action("Reiniciando o Hay Day...")
             self.adb.stop_app(pkg)
@@ -544,17 +556,40 @@ class HayDayBot:
             self.adb.start_app(pkg)
             self.sleep(5)
         end = time.monotonic() + self.cfg["open_game_timeout"]
+        last_diag = 0.0
+        img = None
         while time.monotonic() < end:
             img = self.capture()
             if self.is_farm(img):
-                self.action("Hay Day encontrado")
+                zoom = self.detector.world_zoom
+                self.action("Hay Day encontrado" + (f" (zoom da câmera {zoom:.2f}x)" if zoom else ""))
                 self.screen.reset_freeze()
                 return State.CHECK_FIELD
             if self.adb.foreground_package() not in (pkg, ""):
                 self.adb.start_app(pkg)
-            self.dismiss_popups(img)  # telas de conexão/aviso durante o carregamento
+            if self.dismiss_popups(img):  # telas de conexão/aviso durante o carregamento
+                continue
+            # Nenhuma janela: pode ser o zoom da câmera diferente do usado nos recortes.
+            zoom = self.detector.calibrate_world(img)
+            if zoom is not None and self.is_farm(img):
+                continue
+            if time.monotonic() - last_diag > 20:
+                last_diag = time.monotonic()
+                self._log_detection("farm", img)
             self.sleep(self.cfg["check_interval"])
+        if img is not None:
+            self._log_detection("farm", img, level=log.warning)
         raise StepFailed("O Hay Day não chegou à fazenda dentro do tempo limite")
+
+    def _log_detection(self, category, img, level=None):
+        """Registra por que um template não foi reconhecido (pontuação, zoom, brilho)."""
+        if not self.library.has(category):
+            return
+        try:
+            info = self.detector.diagnose(img, category)
+            (level or log.info)("Fazenda ainda não reconhecida — " + self.detector.describe(category, info))
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Diagnóstico falhou: %s", exc)
 
     def st_check_field(self, ctx):
         img = self.ensure_farm()
@@ -562,6 +597,12 @@ class HayDayBot:
         ready = self.find_all("wheat_ready", img)
         growing = self.find_all("wheat_growing", img) if self.library.has("wheat_growing") else []
         total = len(empty) + len(ready) + len(growing)
+        if total == 0 and self.detector.calibrate_world(img) is not None:
+            log.info("Zoom da câmera recalibrado: %.2fx", self.detector.world_zoom)
+            empty = self.find_all("wheat_empty", img)
+            ready = self.find_all("wheat_ready", img)
+            growing = self.find_all("wheat_growing", img) if self.library.has("wheat_growing") else []
+            total = len(empty) + len(ready) + len(growing)
         self.stats.set(fields_found=total)
         self.action(f"Campos encontrados: {total} (vazios {len(empty)}, prontos {len(ready)}, "
                     f"crescendo {len(growing)})")

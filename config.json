@@ -42,6 +42,13 @@
   "scales": [
     1.0
   ],
+  "match_blur": 2.0,
+  "color_tolerance": 30,
+  "auto_zoom": true,
+  "zoom_range": [
+    0.6,
+    1.6
+  ],
   "drag_mode": "auto",
   "drag_hold": 0.25,
   "drag_step_px": 40,
